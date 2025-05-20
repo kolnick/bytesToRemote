@@ -1,0 +1,9 @@
+paths:
+  - 'D:/qwwork/idletowera/tools/ExceltoBytes/out/server/bytes'
+db_user: root
+db_pass: 123456
+db_name: game_config_data
+db_port: 3307
+db_host: 127.0.0.1
+db_url_params: charset=utf8
+group: ccj
