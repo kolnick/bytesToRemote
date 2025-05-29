@@ -13,15 +13,26 @@ import (
 )
 
 type Config struct {
-	Paths       []string `yaml:"paths"`
-	DBUser      string   `yaml:"db_user"`
-	DBPassword  string   `yaml:"db_pass"`
-	DBName      string   `yaml:"db_name"`
-	DBPort      int      `yaml:"db_port"`
-	DBHost      string   `yaml:"db_host"`
-	UrlParams   string   `yaml:"db_url_params"`
-	ConfigGroup string   `yaml:"group"`
+	Paths       []string            `yaml:"paths"`
+	DBName      string              `yaml:"db_name"`
+	UrlParams   string              `yaml:"db_url_params"`
+	Type        int                 `yaml:"type"`
+	ConfigGroup string              `yaml:"group"`
+	Databases   map[string]DBConfig `yaml:"databases"`
 }
+
+type DBConfig struct {
+	DBUser string `yaml:"db_user"`
+	DBPass string `yaml:"db_pass"`
+	DBPort int    `yaml:"db_port"`
+	DBHost string `yaml:"db_host"`
+}
+
+const (
+	TypeLocal       = 1 // 本地
+	TypeRemote      = 2 // 远程
+	TypeLocalRemote = 3 // 本地和远程都更新
+)
 
 func main() {
 	// Read configuration file
@@ -29,38 +40,64 @@ func main() {
 	if err != nil {
 		log.Fatalf("Error reading config file: %v", err)
 	}
-	// Connect to the database
-	dsn := fmt.Sprintf("%s:%s@tcp(%s:%d)/%s?%s", config.DBUser, config.DBPassword, config.DBHost, config.DBPort, config.DBName, config.UrlParams)
-	db, err := sql.Open("mysql", dsn)
-	if err != nil {
-		log.Fatalf("Error connecting to the database: %v", err)
-	}
-	defer db.Close()
 
-	// Traverse paths and process .bytes fileList
-	fileList := arraylist.New()
-	for _, path := range config.Paths {
-		err := filepath.Walk(path, func(path string, info os.FileInfo, err error) error {
-			if err != nil {
-				return err
-			}
-			if filepath.Ext(path) == ".bytes" {
-				fileName, err := processFile(db, path, config)
-				if err != nil {
-					log.Printf("Error processing file %s: %v", path, err)
-				}
-				fileList.Add(fileName)
-			}
-			return nil
-		})
-		if err != nil {
-			log.Printf("Error traversing path %s: %v", path, err)
+	dbs := loadTargetDatabases(config)
+	defer func() {
+		for _, db := range dbs {
+			db.Close()
 		}
+	}()
+	for _, db := range dbs {
+		// Traverse paths and process .bytes fileList
+		fileList := arraylist.New()
+		for _, path := range config.Paths {
+			err := filepath.Walk(path, func(path string, info os.FileInfo, err error) error {
+				if err != nil {
+					return err
+				}
+				if filepath.Ext(path) == ".bytes" {
+					fileName, err := processFile(db, path, config)
+					if err != nil {
+						log.Printf("Error processing file %s: %v", path, err)
+					}
+					fileList.Add(fileName)
+				}
+				return nil
+			})
+			if err != nil {
+				log.Printf("Error traversing path %s: %v", path, err)
+			}
+		}
+		// 检查表中是否有表没有在目录中，如果有则删除
+		checkAndDelete(db, config, fileList)
 	}
-	// 检查表中是否有表没有在目录中，如果有则删除
-	checkAndDelete(db, config, fileList)
 }
+func loadTargetDatabases(config *Config) map[string]*sql.DB {
+	dbs := make(map[string]*sql.DB)
 
+	for key, dbConf := range config.Databases {
+		// 判断要不要连这个库
+		if (config.Type == TypeLocal && key != "local") ||
+			(config.Type == TypeRemote && key != "remote") {
+			if config.Type != TypeLocalRemote {
+				continue
+			}
+		}
+		// 拼接 DSN
+		dsn := fmt.Sprintf("%s:%s@tcp(%s:%d)/%s?%s",
+			dbConf.DBUser, dbConf.DBPass, dbConf.DBHost, dbConf.DBPort,
+			config.DBName, config.UrlParams)
+
+		db, err := sql.Open("mysql", dsn)
+		if err != nil {
+			log.Fatalf("[%s] Error connecting to DB: %v", key, err)
+		}
+		log.Printf("[%s] 数据库连接成功！", key)
+		dbs[key] = db
+	}
+
+	return dbs
+}
 func checkAndDelete(db *sql.DB, config *Config, list *arraylist.List) {
 
 	query := fmt.Sprintf("SELECT name FROM bytes_data WHERE namespace ='%s'", config.ConfigGroup)
